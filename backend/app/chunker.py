@@ -6,23 +6,8 @@ import re
 import tiktoken
 
 from .config import settings
+from .parser import SECTION_RE, clean_heading
 from .schemas import Chunk, PageContent
-
-# Heading patterns for contract documents.
-# IGNORECASE is intentionally NOT set — ARTICLE is uppercase-only, while
-# Exhibit/Schedule/Appendix/Section appear in mixed case, handled by
-# explicit alternation below.
-_SECTION_RE = re.compile(
-    r"^(?:"
-    r"\d+\.[\d.]*\s+"                    # "1. ", "1.1 ", "1.1.1 "
-    r"|ARTICLE\s+[IVXLC\d]+"            # "ARTICLE I", "ARTICLE 1"
-    r"|[Ee]xhibit\s+[A-Z\d]"            # "Exhibit A"
-    r"|[Ss]chedule\s+[\dA-Z]"           # "Schedule 1"
-    r"|[Aa]ppendix\s+[A-Z\d]"           # "Appendix A"
-    r"|SECTION\s+\d+"                   # "SECTION 1"
-    r")",
-    re.MULTILINE,
-)
 
 # cl100k_base matches GPT-4 / Claude's tokenization closely enough for sizing.
 _tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -118,7 +103,7 @@ def _split_into_sections(text: str) -> list[tuple[str | None, str, int]]:
 
     Returns list of (header | None, body, start_char_offset_in_text).
     """
-    matches = list(_SECTION_RE.finditer(text))
+    matches = list(SECTION_RE.finditer(text))
 
     if not matches:
         return [(None, text, 0)]
@@ -135,10 +120,21 @@ def _split_into_sections(text: str) -> list[tuple[str | None, str, int]]:
         if header_end == -1:
             header_end = len(text)
 
-        header = text[match.start() : header_end].strip()
+        raw_first_line = text[match.start() : header_end].strip()
+        header = clean_heading(raw_first_line) or raw_first_line
+
+        # When clean_heading trims body prose off the raw first line
+        # (heading and first sentence were on the same visual line),
+        # prepend the trimmed portion to the body so no content is lost.
+        trimmed_prefix = ""
+        if header != raw_first_line and raw_first_line.startswith(header):
+            trimmed_prefix = raw_first_line[len(header):].strip()
+
         body_start = header_end + 1
         body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[body_start:body_end].strip()
+        if trimmed_prefix:
+            body = trimmed_prefix + ("\n" + body if body else "")
 
         sections.append((header, body, match.start()))
 
@@ -162,16 +158,23 @@ def _split_oversized(text: str) -> list[tuple[str, int]]:
 
     # Split on blank lines, keeping offsets accurate.
     paragraphs = _segment_by_blank_lines(text)
-    # Each paragraph over the limit → sentence-split in place.
+    # Each paragraph over the limit → sentence-split. Any sentence still
+    # over the limit → hard token-slice so the invariant actually holds.
     units: list[tuple[str, int]] = []
     for p_text, p_offset in paragraphs:
         if _count_tokens(p_text) <= max_tokens:
             units.append((p_text, p_offset))
-        else:
-            for s_text, s_offset_in_p in _segment_by_sentences(p_text):
-                units.append((s_text, p_offset + s_offset_in_p))
+            continue
+        for s_text, s_offset_in_p in _segment_by_sentences(p_text):
+            s_abs = p_offset + s_offset_in_p
+            if _count_tokens(s_text) <= max_tokens:
+                units.append((s_text, s_abs))
+            else:
+                for sliced_text, sliced_offset in _token_slice(s_text, max_tokens):
+                    units.append((sliced_text, s_abs + sliced_offset))
 
-    # Greedy pack units into chunks; walk back for overlap.
+    # Greedy pack units into chunks; walk back for overlap. Every unit is
+    # guaranteed ≤ max_tokens, so single-unit chunks are always in-budget.
     chunks: list[tuple[str, int]] = []
     unit_tokens = [_count_tokens(u[0]) for u in units]
     start = 0
@@ -182,7 +185,7 @@ def _split_oversized(text: str) -> list[tuple[str, int]]:
             total += unit_tokens[end]
             end += 1
 
-        if end == start:  # single unit already exceeds limit — take it anyway
+        if end == start:  # shouldn't happen post-slice; defensive
             end = start + 1
 
         chunk_text = "\n\n".join(u[0] for u in units[start:end])
@@ -236,6 +239,28 @@ def _segment_by_sentences(text: str) -> list[tuple[str, int]]:
 
 def _count_tokens(text: str) -> int:
     return len(_tokenizer.encode(text))
+
+
+def _token_slice(text: str, max_tokens: int) -> list[tuple[str, int]]:
+    """Last-resort hard slice for text whose smallest natural unit (a single
+    sentence) still exceeds the token budget. Splits on token boundaries and
+    returns (piece, char_offset_in_text). Offsets are recovered by searching
+    the source text, which is exact for cl100k_base decoding on contiguous
+    token ranges.
+    """
+    tokens = _tokenizer.encode(text)
+    pieces: list[tuple[str, int]] = []
+    cursor = 0
+    for i in range(0, len(tokens), max_tokens):
+        piece = _tokenizer.decode(tokens[i : i + max_tokens])
+        if not piece:
+            continue
+        idx = text.find(piece, cursor)
+        if idx == -1:
+            idx = cursor
+        pieces.append((piece, idx))
+        cursor = idx + len(piece)
+    return pieces
 
 
 def _get_page_numbers(

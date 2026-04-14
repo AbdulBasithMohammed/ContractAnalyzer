@@ -15,22 +15,79 @@ from .schemas import PageContent, TableBlock
 
 logger = logging.getLogger(__name__)
 
+# Heading patterns for contract documents. HEADING_RE matches a single line
+# (used by the parser for y-attributed heading tracking); SECTION_RE is the
+# MULTILINE version (re-exported for the chunker to split full documents).
+# IGNORECASE is intentionally NOT set — ARTICLE is uppercase-only, while
+# Exhibit/Schedule/Appendix/Section appear in mixed case and are handled by
+# explicit alternation below.
+_HEADING_PATTERN = (
+    r"^(?:"
+    r"\d+\.[\d.]*\s+"                    # "1. ", "1.1 ", "1.1.1 "
+    r"|ARTICLE\s+[IVXLC\d]+"            # "ARTICLE I", "ARTICLE 1"
+    r"|[Ee]xhibit\s+[A-Z\d]"            # "Exhibit A"
+    r"|[Ss]chedule\s+[\dA-Z]"           # "Schedule 1"
+    r"|[Aa]ppendix\s+[A-Z\d]"           # "Appendix A"
+    r"|SECTION\s+\d+"                   # "SECTION 1"
+    r")"
+)
+HEADING_RE = re.compile(_HEADING_PATTERN)
+SECTION_RE = re.compile(_HEADING_PATTERN, re.MULTILINE)
+
+# Safety cap for extracted headings. Legitimate contract titles are
+# short; anything longer is a symptom of merged body text we didn't trim.
+_MAX_HEADING_LEN = 150
+
+
+def clean_heading(line: str) -> str | None:
+    """Extract just the heading title from a line that may also contain
+    the first sentence of the section's body.
+
+    PyMuPDF's block extraction frequently merges a heading and its opening
+    sentence onto the same visual line (no `\\n` between them). Taking the
+    raw first line as the heading — as we did originally — pollutes the
+    section label with prose ("2.2 Service Description (semi-structured).
+    The parties intend the following summary to describe the ").
+
+    Strategy: match the heading prefix, then cut at the first ". " that
+    isn't part of the numbering (so "ARTICLE I. Definitions. Body" still
+    keeps "Definitions"). Headings without any internal period-space
+    are returned whole.
+    """
+    m = HEADING_RE.match(line)
+    if not m:
+        return None
+
+    title_start = m.end()
+    rest = line[title_start:]
+
+    # Skip a leading ". " which belongs to the numbering itself
+    # (e.g., "ARTICLE I" + ". Definitions. Body...").
+    search_from = 2 if rest.startswith(". ") else 0
+    sep = rest.find(". ", search_from)
+
+    if sep == -1:
+        heading = line.rstrip()
+    else:
+        heading = line[: title_start + sep + 1]  # include the trailing period
+
+    if len(heading) > _MAX_HEADING_LEN:
+        heading = heading[:_MAX_HEADING_LEN].rstrip() + "…"
+    return heading
+
 # Formats Claude vision API accepts
 _SUPPORTED_IMAGE_FORMATS = {"png", "jpeg", "jpg", "gif", "webp"}
 
-# Matches heading lines (same patterns as chunker). Duplicated here so the
-# parser can attribute tables to their nearest preceding heading using
-# positional info that is only available during parsing.
-_HEADING_RE = re.compile(
-    r"^(?:"
-    r"\d+\.[\d.]*\s+"
-    r"|ARTICLE\s+[IVXLC\d]+"
-    r"|[Ee]xhibit\s+[A-Z\d]"
-    r"|[Ss]chedule\s+[\dA-Z]"
-    r"|[Aa]ppendix\s+[A-Z\d]"
-    r"|SECTION\s+\d+"
-    r")"
-)
+# Table/prose overlap: a text block is treated as part of a table when more
+# than this fraction of its area overlaps any table bbox.
+_TABLE_OVERLAP_THRESHOLD = 0.5
+
+# Scanned-page gating: flag text as "garbage" when the ratio of letters /
+# digits / common punctuation drops below this. PDFs with broken CID font
+# maps produce long strings of PUA chars or (cid:N) tokens that sail past a
+# pure length check, so we gate on content quality as well.
+_MIN_READABLE_RATIO = 0.7
+_READABLE_EXTRA = set(" .,;:!?()[]-'\"/%$&@#*+=<>\n\t")
 
 
 async def parse_pdf(file_path: str) -> list[PageContent]:
@@ -87,7 +144,10 @@ async def parse_pdf(file_path: str) -> list[PageContent]:
             # 3. Image detection & page classification
             images = page.get_images(full=True)
             has_images = len(images) > 0
-            is_text_sparse = len(text) < settings.min_text_length
+            is_text_sparse = (
+                len(text) < settings.min_text_length
+                or _looks_like_garbage(text)
+            )
 
             image_descriptions = ""
 
@@ -144,18 +204,41 @@ def _extract_prose_and_headings(
 
     for block in blocks_sorted:
         x0, y0, x1, y1, block_text, *_ = block
-        cx = (x0 + x1) / 2
-        cy = (y0 + y1) / 2
-        if any(tb.x0 <= cx <= tb.x1 and tb.y0 <= cy <= tb.y1 for tb in table_rects):
+        block_rect = fitz.Rect(x0, y0, x1, y1)
+        block_area = block_rect.get_area()
+        if block_area > 0 and any(
+            (block_rect & tb).get_area() / block_area > _TABLE_OVERLAP_THRESHOLD
+            for tb in table_rects
+        ):
             continue
 
         parts.append(block_text)
 
         first_line = block_text.strip().split("\n", 1)[0]
-        if _HEADING_RE.match(first_line):
-            headings.append((y0, first_line))
+        heading = clean_heading(first_line)
+        if heading:
+            headings.append((y0, heading))
 
     return "\n".join(parts).strip(), headings
+
+
+def _looks_like_garbage(text: str) -> bool:
+    """Heuristic: PDF text quality check for scanned-page gating.
+
+    Returns True when the stripped text is too short to judge, or when the
+    ratio of readable chars (letters, digits, common punctuation) falls
+    below the threshold. Catches CID-mapping failures and PUA-heavy
+    encodings that slip past a pure length check.
+    """
+    stripped = text.strip()
+    if len(stripped) < 50:
+        return False
+    if "(cid:" in stripped:
+        return True
+    readable = sum(
+        1 for c in stripped if c.isalnum() or c in _READABLE_EXTRA
+    )
+    return readable / len(stripped) < _MIN_READABLE_RATIO
 
 
 # ---------------------------------------------------------------------------

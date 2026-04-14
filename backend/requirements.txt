@@ -11,8 +11,8 @@ anthropic==0.52.0
 tiktoken==0.8.0
 
 # Embeddings + vector store
-sentence-transformers==4.1.0
-faiss-cpu==1.11.0
+voyageai==0.3.7
+qdrant-client==1.17.1
 
 # Data validation
 pydantic==2.11.3

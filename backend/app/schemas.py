@@ -29,6 +29,12 @@ class Chunk(BaseModel):
     chunk_index: int
 
 
+# --- Retriever output ---
+
+class RetrievedChunk(Chunk):
+    score: float
+
+
 # --- Compliance analysis ---
 
 class ComplianceState(str, Enum):
