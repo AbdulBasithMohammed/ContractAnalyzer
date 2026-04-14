@@ -70,9 +70,6 @@ backend/
 frontend/
   app.py            # Streamlit UI
 docker-compose.yml  # Qdrant v1.12.4
-details.md          # deep technical walkthrough
-PRD.md              # product requirements + design rationale
-CLAUDE.md           # guidance for Claude Code
 ```
 
 ## API surface
@@ -95,5 +92,3 @@ Schemas: [backend/app/schemas.py](backend/app/schemas.py).
 - **Two-step API** — same index backs analyze *and* chat without re-running upstream stages.
 - **SQLite + Qdrant session store** — metadata in SQLite, vectors in Qdrant; `EmbeddingIndex.attach()` rebuilds the handle across restarts.
 - **Position-preserving failure isolation** — one question's analyzer failure doesn't take down the other four.
-
-Full rationale: [details.md](details.md) §14 and [PRD.md](PRD.md) §6–§8.
