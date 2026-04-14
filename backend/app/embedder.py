@@ -1,5 +1,5 @@
 # Stage 3: Embedding
-# Voyage voyage-law-2 embeddings stored in in-memory Qdrant.
+# Voyage voyage-law-2 embeddings stored in Qdrant (server or in-memory).
 
 import logging
 import time
@@ -25,25 +25,60 @@ def _get_voyage_client() -> voyageai.Client:
     return _voyage_client
 
 
-class EmbeddingIndex:
-    """Per-upload ephemeral vector index.
+def _make_qdrant_client() -> QdrantClient:
+    """Build a client for either an embedded (`:memory:`) or server Qdrant.
 
-    Each instance owns its own in-memory Qdrant store. The collection
-    lives only as long as the instance — no cross-upload leakage, no
-    persistence.
+    qdrant-client's param names diverge: in-process wants `location=`, a
+    server wants `url=`. Passing a URL via `location=` works on some
+    versions but isn't the documented path; branch explicitly.
+    """
+    loc = settings.qdrant_location
+    if loc.startswith(":"):
+        return QdrantClient(location=loc)
+    return QdrantClient(url=loc)
+
+
+class EmbeddingIndex:
+    """Per-upload vector index backed by Qdrant.
+
+    Persistent when QDRANT_LOCATION is a server URL, ephemeral when it's
+    ":memory:". `attach()` re-binds to a pre-existing collection so the
+    SQLite session store can rebuild the index handle after a restart
+    without re-embedding.
     """
 
-    def __init__(self, upload_id: str):
+    def __init__(self, upload_id: str, *, create: bool = True):
         self.upload_id = upload_id
         self.collection = f"upload_{upload_id}"
-        self.client = QdrantClient(location=settings.qdrant_location)
-        self.client.create_collection(
-            collection_name=self.collection,
-            vectors_config=VectorParams(
-                size=settings.embedding_dim,
-                distance=Distance.COSINE,
-            ),
-        )
+        self.client = _make_qdrant_client()
+        if create:
+            # Drop-and-create so re-uploading the same upload_id starts
+            # from a clean collection. UUID upload_ids mean collisions
+            # don't happen in practice, but the idempotency is cheap.
+            if self.client.collection_exists(self.collection):
+                self.client.delete_collection(self.collection)
+            self.client.create_collection(
+                collection_name=self.collection,
+                vectors_config=VectorParams(
+                    size=settings.embedding_dim,
+                    distance=Distance.COSINE,
+                ),
+            )
+
+    @classmethod
+    def attach(cls, upload_id: str) -> "EmbeddingIndex | None":
+        """Bind to an existing Qdrant collection without recreating it.
+
+        Returns None if the collection is missing — the caller treats
+        that as "session gone" and 404s the request.
+        """
+        inst = cls.__new__(cls)
+        inst.upload_id = upload_id
+        inst.collection = f"upload_{upload_id}"
+        inst.client = _make_qdrant_client()
+        if not inst.client.collection_exists(inst.collection):
+            return None
+        return inst
 
     def build(self, chunks: list[Chunk]) -> None:
         """Embed and upsert all chunks. No-op on empty input."""

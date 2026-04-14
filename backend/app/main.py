@@ -62,6 +62,39 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/api/session/{upload_id}")
+async def session_info(upload_id: str) -> dict:
+    """Cheap liveness probe used by the frontend on cache rehydrate.
+
+    200 means the SQLite metadata row exists AND its Qdrant collection
+    is still present, so /api/analyze and /api/chat will work. 404 means
+    the session is gone; the frontend drops the cached analysis.
+    """
+    session = sessions.get(upload_id)
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown upload_id '{upload_id}'.",
+        )
+    return {
+        "upload_id": session.upload_id,
+        "filename": session.filename,
+        "page_count": session.page_count,
+        "chunk_count": session.chunk_count,
+    }
+
+
+@app.delete("/api/session/{upload_id}")
+async def delete_session(upload_id: str) -> dict:
+    """Drop a session's SQLite row and its Qdrant collection.
+
+    Idempotent — returns ok even if the upload_id was already gone, so
+    the frontend "Clear analysis" button never has to think about state.
+    """
+    sessions.delete(upload_id)
+    return {"status": "deleted", "upload_id": upload_id}
+
+
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload(file: UploadFile = File(...)) -> UploadResponse:
     """Parse, chunk, and embed an uploaded PDF; register a session."""

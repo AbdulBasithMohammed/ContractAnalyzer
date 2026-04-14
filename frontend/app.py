@@ -81,10 +81,43 @@ def init_state() -> None:
             st.session_state.upload_id = cached.get("upload_id")
             st.session_state.upload_meta = cached.get("upload_meta")
             st.session_state.analysis = cached.get("analysis")
-            # Backend session may be gone after a uvicorn restart; chat
-            # will 404 until the user re-uploads. Flag it so the UI can
-            # surface this instead of just silently failing.
-            st.session_state.session_stale = True
+            # With persistent Qdrant + SQLite the backend usually still
+            # holds this session after a restart. Probe it so we only
+            # show the "re-upload to chat" banner when it's truly gone.
+            st.session_state.session_stale = not _backend_has_session(
+                st.session_state.upload_id
+            )
+
+
+def _backend_has_session(upload_id: str | None) -> bool:
+    """Return True iff the backend still knows this upload_id."""
+    if not upload_id:
+        return False
+    try:
+        resp = requests.get(
+            f"{BACKEND_URL}/api/session/{upload_id}",
+            timeout=3,
+        )
+    except requests.RequestException:
+        return False
+    return resp.status_code == 200
+
+
+def _clear_analysis(upload_id: str | None) -> None:
+    """Drop the backend session, wipe local cache, and reset UI state."""
+    if upload_id:
+        try:
+            requests.delete(
+                f"{BACKEND_URL}/api/session/{upload_id}",
+                timeout=5,
+            )
+        except requests.RequestException:
+            # Backend unreachable is fine — we still clear local state
+            # so the UI returns to empty; the stale row will self-clean
+            # on next access via the orphan-metadata branch in sessions.get.
+            pass
+    reset_document_state()
+    st.session_state.current_file_id = None
 
 
 def reset_document_state() -> None:
@@ -593,6 +626,14 @@ def render_sidebar() -> tuple[Any, bool]:
                 mime="application/json",
                 use_container_width=True,
             )
+
+            if st.button(
+                "🗑️ Clear analysis",
+                use_container_width=True,
+                help="Drop this session and return to the empty state.",
+            ):
+                _clear_analysis(st.session_state.upload_id)
+                st.rerun()
 
             with st.expander("Models"):
                 st.code(

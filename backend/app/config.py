@@ -5,7 +5,8 @@ from pydantic_settings import BaseSettings
 # Pin .env to backend/.env regardless of where uvicorn/streamlit is launched
 # from. Without this, pydantic-settings resolves the path against CWD and
 # misses the file when run from the repo root.
-_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_ENV_FILE = _BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -18,7 +19,11 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 8
     embedding_batch_sleep_sec: float = 21.0
     embedding_max_retries: int = 5
-    qdrant_location: str = ":memory:"
+    # `:memory:` runs an embedded Qdrant inside the uvicorn process and
+    # dies with it. A URL (e.g. http://localhost:6333) points at a server
+    # whose collections survive restarts — the production path.
+    qdrant_location: str = "http://localhost:6333"
+    session_db_path: str = str(_BACKEND_DIR / "sessions.db")
     max_chunk_tokens: int = 1000
     chunk_overlap_tokens: int = 200
     retrieval_top_k: int = 5
