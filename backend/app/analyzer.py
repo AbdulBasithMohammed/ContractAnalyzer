@@ -35,8 +35,11 @@ async def analyze_question(
     """Grade one compliance question against its retrieved context.
 
     Uses forced tool_use so the model must respond via the structured-output
-    tool. The tool input is validated into a ComplianceResult; the
-    `compliance_question` field is filled from the question's verbatim text.
+    tool. The tool input is tolerantly coerced into a ComplianceResult:
+    confidence is clamped to [0, 100] and empty quotes are replaced with a
+    placeholder (logged) rather than rejected — the tool schema already
+    constrains shape, so this handles mild drift without killing the call.
+    The `compliance_question` field is filled from the question's verbatim text.
     """
     client = _get_client()
     user_message = build_user_message(question, chunks)
@@ -48,11 +51,24 @@ async def analyze_question(
         question_id=question.id,
     )
 
+    confidence = float(tool_input["confidence"])
+    if confidence < 0 or confidence > 100:
+        logger.warning(
+            "analyze[%s]: confidence %.2f out of range; clamping",
+            question.id, confidence,
+        )
+        confidence = max(0.0, min(100.0, confidence))
+
+    quotes = tool_input.get("relevant_quotes") or ""
+    if not quotes.strip():
+        logger.warning("analyze[%s]: empty relevant_quotes returned", question.id)
+        quotes = "(model returned no quotes)"
+
     result = ComplianceResult(
         compliance_question=question.question,
         compliance_state=ComplianceState(tool_input["compliance_state"]),
-        confidence=float(tool_input["confidence"]),
-        relevant_quotes=tool_input["relevant_quotes"],
+        confidence=confidence,
+        relevant_quotes=quotes,
         rationale=tool_input["rationale"],
     )
     logger.info(
@@ -67,14 +83,28 @@ async def analyze_all(
 ) -> list[ComplianceResult]:
     """Analyze all 5 compliance questions in parallel.
 
-    Results are returned in COMPLIANCE_QUESTIONS order, not dict-iteration
-    order, so the downstream response is deterministic.
+    Per-question failures are isolated: if one call raises after retries, the
+    other four still complete and the failed slot is returned as a
+    ComplianceResult with `error` set (other fields null). Results preserve
+    COMPLIANCE_QUESTIONS order.
     """
     tasks = [
         analyze_question(q, retrieved.get(q.id, []))
         for q in COMPLIANCE_QUESTIONS
     ]
-    return await asyncio.gather(*tasks)
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    results: list[ComplianceResult] = []
+    for q, outcome in zip(COMPLIANCE_QUESTIONS, outcomes):
+        if isinstance(outcome, BaseException):
+            logger.error("analyze[%s]: failed: %s", q.id, outcome)
+            results.append(ComplianceResult(
+                compliance_question=q.question,
+                error=f"{type(outcome).__name__}: {outcome}",
+            ))
+        else:
+            results.append(outcome)
+    return results
 
 
 # ---------------------------------------------------------------------------

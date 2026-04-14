@@ -44,16 +44,62 @@ class ComplianceState(str, Enum):
 
 
 class ComplianceResult(BaseModel):
+    """One verdict per compliance question.
+
+    Invariant: `error is None` iff the analyzer succeeded, in which case all
+    other fields are populated. When analysis fails for this question, `error`
+    carries a short message and the verdict fields are left null so the
+    position in the overall results list is preserved.
+    """
     compliance_question: str
-    compliance_state: ComplianceState
-    confidence: float = Field(ge=0, le=100)
-    relevant_quotes: str
-    rationale: str
+    compliance_state: ComplianceState | None = None
+    confidence: float | None = Field(default=None, ge=0, le=100)
+    relevant_quotes: str | None = None
+    rationale: str | None = None
+    error: str | None = None
+
+
+# --- Response metadata ---
+
+class StageTimings(BaseModel):
+    parse_sec: float
+    chunk_sec: float
+    embed_sec: float
+    retrieve_sec: float
+    analyze_sec: float
+    total_sec: float
+
+
+class QuestionRetrievalStats(BaseModel):
+    question_id: str
+    chunks_used: int
+    context_tokens: int
+    top_score: float | None = None
+
+
+class AnalysisMetadata(BaseModel):
+    upload_id: str
+    filename: str
+    page_count: int
+    chunk_count: int
+    timings: StageTimings
+    retrieval: list[QuestionRetrievalStats]
+    models: dict[str, str]
 
 
 class AnalysisResponse(BaseModel):
     results: list[ComplianceResult]
-    metadata: dict = Field(default_factory=dict)
+    metadata: AnalysisMetadata
+
+
+class UploadResponse(BaseModel):
+    upload_id: str
+    filename: str
+    page_count: int
+    chunk_count: int
+    parse_sec: float
+    chunk_sec: float
+    embed_sec: float
 
 
 # --- Chat ---
