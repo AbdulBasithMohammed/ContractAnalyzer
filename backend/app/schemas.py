@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -104,11 +105,24 @@ class UploadResponse(BaseModel):
 
 # --- Chat ---
 
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class ChatRequest(BaseModel):
+    """Client sends the raw user turn plus the prior conversation.
+
+    History is client-owned — the server re-runs retrieval for each turn
+    against the latest `message`, so prior assistant responses in `history`
+    should be the user-visible text only (no injected context excerpts).
+    """
     message: str
-    session_id: str
+    history: list[ChatMessage] = Field(default_factory=list)
 
 
-class ChatResponse(BaseModel):
-    response: str
-    sources: list[dict] = Field(default_factory=list)
+class ChatSource(BaseModel):
+    chunk_index: int
+    section_header: str | None = None
+    page_numbers: list[int]
+    score: float

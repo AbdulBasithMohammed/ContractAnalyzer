@@ -1,4 +1,11 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
+
+# Pin .env to backend/.env regardless of where uvicorn/streamlit is launched
+# from. Without this, pydantic-settings resolves the path against CWD and
+# misses the file when run from the repo root.
+_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 
 class Settings(BaseSettings):
@@ -18,11 +25,13 @@ class Settings(BaseSettings):
     retrieval_context_tokens: int = 8000
     analysis_max_tokens: int = 1024
     analysis_max_retries: int = 3
+    chat_top_k: int = 6
+    chat_max_tokens: int = 1024
     min_text_length: int = 100
     significant_image_min_dim: int = 200
     upload_dir: str = "uploads"
 
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": str(_ENV_FILE)}
 
 
 settings = Settings()

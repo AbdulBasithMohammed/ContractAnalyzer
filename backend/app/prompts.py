@@ -95,6 +95,34 @@ def _format_chunk(chunk: RetrievedChunk, index: int) -> str:
     return f"[Chunk {index} | Section: {header} | Pages: {pages}]\n{chunk.text}"
 
 
+CHAT_SYSTEM_PROMPT = """You are an assistant answering questions about a single vendor security contract (an information-security addendum to a master services agreement).
+
+Rules:
+- Use ONLY the contract excerpts provided in each user turn. Do not rely on outside knowledge or general industry practice.
+- If the excerpts do not address the question, say so plainly. Do not speculate or fabricate.
+- When you quote the contract, use verbatim text and cite the section header and page numbers shown in the excerpts, e.g. (§6.6 Password Management Standard, p.7).
+- Keep answers concise and directly responsive to the question. No preamble."""
+
+
+def build_chat_user_message(message: str, chunks: list[RetrievedChunk]) -> str:
+    """Assemble a chat user turn: retrieved excerpts + the user's question."""
+    if chunks:
+        context = "\n\n---\n\n".join(
+            _format_chunk(c, i + 1) for i, c in enumerate(chunks)
+        )
+    else:
+        context = "(no contract excerpts retrieved for this question)"
+
+    return (
+        "## Contract excerpts\n"
+        "The following excerpts were retrieved from the contract as the "
+        "passages most relevant to the question.\n\n"
+        f"{context}\n\n"
+        "## Question\n"
+        f"{message}"
+    )
+
+
 def build_user_message(
     question: ComplianceQuestion,
     chunks: list[RetrievedChunk],

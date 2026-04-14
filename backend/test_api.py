@@ -6,6 +6,7 @@ FastAPI's in-process TestClient — no port, no uvicorn boot.
 Run from the backend/ dir:  python test_api.py
 """
 
+import json
 import logging
 import os
 
@@ -102,6 +103,45 @@ def main() -> None:
         print(f"    confidence:  {res['confidence']:.1f}")
         print(f"    quotes:      {preview(res['relevant_quotes'])}")
         print(f"    rationale:   {preview(res['rationale'])}")
+
+    # --- /api/chat/{upload_id} ---
+    hr(f"POST /api/chat/{upload_id}  (streaming)")
+    with client.stream(
+        "POST",
+        f"/api/chat/{upload_id}",
+        json={
+            "message": "Who are the parties to this agreement and what does it govern?",
+            "history": [],
+        },
+    ) as r:
+        if r.status_code != 200:
+            print(f"  FAILED: {r.status_code} {r.read().decode()}")
+            raise SystemExit(1)
+        sources: list[dict] = []
+        full_text = ""
+        errored = False
+        for line in r.iter_lines():
+            if not line:
+                continue
+            evt = json.loads(line)
+            t = evt.get("type")
+            if t == "sources":
+                sources = evt["sources"]
+            elif t == "delta":
+                full_text += evt["text"]
+            elif t == "error":
+                print(f"  STREAM ERROR: {evt['error']}")
+                errored = True
+                break
+            elif t == "done":
+                break
+    print(f"  sources:     {len(sources)} chunk(s)")
+    for s in sources[:3]:
+        pages = ",".join(f"p.{p}" for p in s["page_numbers"])
+        print(f"    [{s['chunk_index']:>3}] {s.get('section_header') or '(preamble)'} · {pages} · {s['score']:.3f}")
+    print(f"  answer:      {preview(full_text, 260)}")
+    if errored:
+        raise SystemExit(1)
 
     # --- unknown upload_id ---
     hr("POST /api/analyze/<bogus>  (expect 404)")
