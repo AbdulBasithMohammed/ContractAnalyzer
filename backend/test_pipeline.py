@@ -1,10 +1,11 @@
-"""End-to-end smoke test for Stage 1 (Parser), Stage 2 (Chunker), Stage 3 (Embedder).
+"""End-to-end smoke test for Stages 1-4 (Parse, Chunk, Embed, Retrieve).
 
 Run from the backend/ dir:  python test_pipeline.py
 
 Prints a human-readable trace of what each stage produces, including
 Qdrant collection internals, embedding dimensions, vector samples,
-and live similarity-search results against the sample contract.
+live similarity-search results, and multi-query retrieval output per
+compliance question against the sample contract.
 """
 
 import asyncio
@@ -16,6 +17,7 @@ from app.chunker import chunk_pages
 from app.config import settings
 from app.embedder import EmbeddingIndex, _compose_embed_text
 from app.parser import parse_pdf
+from app.retriever import COMPLIANCE_QUESTIONS, retrieve_all
 
 # Show embedder batch progress live so the throttled free-tier run isn't silent.
 logging.basicConfig(
@@ -173,10 +175,35 @@ async def main():
             print(f"      {preview(h.text, 110)}")
 
     # ------------------------------------------------------------------
+    # Stage 4 — Retriever (multi-query per compliance question)
+    # ------------------------------------------------------------------
+    hr("STAGE 4 — RETRIEVER (multi-query per compliance question)")
+    print(f"  Questions:             {len(COMPLIANCE_QUESTIONS)}")
+    print(f"  Sub-queries/question:  "
+          f"{[len(q.sub_queries) for q in COMPLIANCE_QUESTIONS]}")
+    print(f"  top_k per sub-query:   {settings.retrieval_top_k}")
+    print(f"  Context token budget:  {settings.retrieval_context_tokens}")
+
+    t0 = time.perf_counter()
+    retrieved = retrieve_all(index)
+    t_retrieve = time.perf_counter() - t0
+    print(f"  Elapsed (all 5):       {t_retrieve:.2f}s")
+
+    for q in COMPLIANCE_QUESTIONS:
+        hits = retrieved[q.id]
+        print(f"\n  [{q.id}] {q.title} — {len(hits)} chunks in doc order")
+        for h in hits:
+            header = h.section_header or "(preamble)"
+            print(f"    score={h.score:.4f}  idx={h.chunk_index:>3}  "
+                  f"pages={h.page_numbers}  header={header!r}")
+            print(f"      {preview(h.text, 110)}")
+
+    # ------------------------------------------------------------------
     hr("DONE", char="-")
-    print(f"  parse:  {t_parse:>5.2f}s")
-    print(f"  chunk:  {t_chunk:>5.2f}s")
-    print(f"  embed:  {t_build:>5.2f}s  ({len(chunks)} chunks)")
+    print(f"  parse:     {t_parse:>5.2f}s")
+    print(f"  chunk:     {t_chunk:>5.2f}s")
+    print(f"  embed:     {t_build:>5.2f}s  ({len(chunks)} chunks)")
+    print(f"  retrieve:  {t_retrieve:>5.2f}s  (5 questions)")
 
 
 if __name__ == "__main__":

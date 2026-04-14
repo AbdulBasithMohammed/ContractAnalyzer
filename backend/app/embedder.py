@@ -72,23 +72,39 @@ class EmbeddingIndex:
 
     def search(self, query: str, top_k: int | None = None) -> list[RetrievedChunk]:
         """Embed a query and return the top-k nearest chunks."""
+        return self.search_batch([query], top_k=top_k)[0]
+
+    def search_batch(
+        self, queries: list[str], top_k: int | None = None
+    ) -> list[list[RetrievedChunk]]:
+        """Embed all queries in one API call, then run per-query vector search.
+
+        Collapses N Voyage HTTP round-trips into 1 — the dominant cost for
+        small in-memory indexes where Qdrant itself is ~free per query.
+        Returns results aligned with the input order.
+        """
         top_k = top_k or settings.retrieval_top_k
-        vector = _embed_query(query)
-        result = self.client.query_points(
-            collection_name=self.collection,
-            query=vector,
-            limit=top_k,
-        )
-        return [
-            RetrievedChunk(
-                text=hit.payload["text"],
-                page_numbers=hit.payload["page_numbers"],
-                section_header=hit.payload["section_header"],
-                chunk_index=hit.payload["chunk_index"],
-                score=float(hit.score),
-            )
-            for hit in result.points
-        ]
+        if not queries:
+            return []
+        vectors = _embed_queries(queries)
+        results: list[list[RetrievedChunk]] = []
+        for vector in vectors:
+            hits = self.client.query_points(
+                collection_name=self.collection,
+                query=vector,
+                limit=top_k,
+            ).points
+            results.append([
+                RetrievedChunk(
+                    text=hit.payload["text"],
+                    page_numbers=hit.payload["page_numbers"],
+                    section_header=hit.payload["section_header"],
+                    chunk_index=hit.payload["chunk_index"],
+                    score=float(hit.score),
+                )
+                for hit in hits
+            ])
+        return results
 
 
 def build_index(upload_id: str, chunks: list[Chunk]) -> EmbeddingIndex:
@@ -136,9 +152,9 @@ def _embed_documents(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def _embed_query(text: str) -> list[float]:
-    """Embed a single query string. input_type='query' is asymmetric to 'document'."""
-    return _embed_with_retry([text], "query")[0]
+def _embed_queries(texts: list[str]) -> list[list[float]]:
+    """Batch-embed query strings. input_type='query' is asymmetric to 'document'."""
+    return _embed_with_retry(texts, "query")
 
 
 def _embed_with_retry(texts: list[str], input_type: str) -> list[list[float]]:

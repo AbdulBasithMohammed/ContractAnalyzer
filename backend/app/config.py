@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     max_chunk_tokens: int = 1000
     chunk_overlap_tokens: int = 200
     retrieval_top_k: int = 5
+    retrieval_context_tokens: int = 8000
     min_text_length: int = 100
     significant_image_min_dim: int = 200
     upload_dir: str = "uploads"
