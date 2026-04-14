@@ -13,6 +13,7 @@ import logging
 import os
 import time
 
+from app.analyzer import analyze_all
 from app.chunker import chunk_pages
 from app.config import settings
 from app.embedder import EmbeddingIndex, _compose_embed_text
@@ -199,11 +200,31 @@ async def main():
             print(f"      {preview(h.text, 110)}")
 
     # ------------------------------------------------------------------
+    # Stage 5 — Analyzer (5 parallel Claude Sonnet calls)
+    # ------------------------------------------------------------------
+    hr("STAGE 5 — ANALYZER (Claude Sonnet, 5 parallel calls)")
+    print(f"  Model:                 {settings.analysis_model}")
+    print(f"  Max tokens/response:   {settings.analysis_max_tokens}")
+
+    t0 = time.perf_counter()
+    results = await analyze_all(retrieved)
+    t_analyze = time.perf_counter() - t0
+    print(f"  Elapsed (all 5):       {t_analyze:.2f}s")
+
+    for q, result in zip(COMPLIANCE_QUESTIONS, results):
+        print(f"\n  [{q.id}] {q.title}")
+        print(f"    state:       {result.compliance_state.value}")
+        print(f"    confidence:  {result.confidence:.1f}")
+        print(f"    quotes:      {preview(result.relevant_quotes, 200)}")
+        print(f"    rationale:   {preview(result.rationale, 200)}")
+
+    # ------------------------------------------------------------------
     hr("DONE", char="-")
     print(f"  parse:     {t_parse:>5.2f}s")
     print(f"  chunk:     {t_chunk:>5.2f}s")
     print(f"  embed:     {t_build:>5.2f}s  ({len(chunks)} chunks)")
     print(f"  retrieve:  {t_retrieve:>5.2f}s  (5 questions)")
+    print(f"  analyze:   {t_analyze:>5.2f}s  (5 questions)")
 
 
 if __name__ == "__main__":
